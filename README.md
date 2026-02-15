@@ -10,7 +10,7 @@
 
 ## 🎯 What is Quint?
 
-**Captain Quint** is a fair-launched Solana meme coin on Pump.fun with a legendary Jaws theme. Launched Feb 15, 2026, it pits Captain Quint against the great whites of the crypto sea.
+**Captain Quint** is a fair-launched Solana meme coin on Pump.fun with a legendary Jaws theme. Launched Feb 15, 2026, Crew will be quants utilizing ai indicators produced by Dev.
 
 - **Token**: $QUINT (CA: `Dt5WavAs69RtbqWmbcwtvDRYgDREK65CcJ2YjC5Lpump`)
 - **Current Status**: Early bonding curve • \~$2.4K MC • Building crew for the next moon mission
