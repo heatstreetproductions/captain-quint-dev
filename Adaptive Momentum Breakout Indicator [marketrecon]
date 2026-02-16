@@ -1,0 +1,72 @@
+//@version=5
+indicator(title="Adaptive Momentum Breakout Indicator Higher Timeframe [marketrecon]", shorttitle="AMBI Higher_marketrecon", overlay=true)
+
+// Inputs for customization
+fastLen = input.int(8, "Fast EMA Length", minval=1, group="Trend")
+slowLen = input.int(21, "Slow EMA Length", minval=1, group="Trend")
+rsiLen = input.int(14, "RSI Length", group="Momentum")
+rsiOverbought = input.int(70, "RSI Overbought", group="Momentum")
+rsiOversold = input.int(30, "RSI Oversold", group="Momentum")
+atrLen = input.int(14, "ATR Length", group="Volatility")
+atrMult = input.float(1.5, "ATR Multiplier for Filter", group="Volatility")
+useVolume = input.bool(true, "Use Volume Confirmation", group="Filters")
+volMaLen = input.int(20, "Volume MA Length", group="Filters")
+showSignals = input.bool(true, "Show Entry Signals", group="Display")
+showEmaCross = input.bool(true, "Show EMA Crossover Signals", group="Display")
+showAlerts = input.bool(true, "Enable Alerts", group="Alerts")
+
+// Timeframe adaptation: Scale lengths for small TFs to reduce lag, longer for bigger TFs
+tfMult = timeframe.period == "1" or timeframe.period == "3" or timeframe.period == "5" ? 0.8 :
+         timeframe.period == "15" or timeframe.period == "30" ? 1.0 :
+         timeframe.period == "60" or timeframe.period == "240" ? 1.2 :
+         timeframe.period == "D" ? 1.5 :
+         timeframe.period == "W" ? 2.0 :
+         timeframe.period == "M" ? 3.0 : 1.0
+
+adjFastLen = math.round(fastLen * tfMult)
+adjSlowLen = math.round(slowLen * tfMult)
+adjRsiLen = math.round(rsiLen * tfMult)
+adjAtrLen = math.round(atrLen * tfMult)
+adjVolLen = math.round(volMaLen * tfMult)
+
+// Calculations
+fastEma = ta.ema(close, adjFastLen)
+slowEma = ta.ema(close, adjSlowLen)
+rsi = ta.rsi(close, adjRsiLen)
+atr = ta.atr(adjAtrLen)
+volMa = ta.sma(volume, adjVolLen)
+
+// Volatility filter: Low vol = tighter filter to avoid chop; use ATR to gauge "calm" periods for breakouts
+volFilter = atr < ta.sma(atr, adjAtrLen) * atrMult  // True if current ATR is below recent average (low vol)
+
+// Volume confirmation: Current vol > MA for conviction
+volConfirm = useVolume ? volume > volMa : true
+
+// Entry Signals
+// Long: Price crosses above fast EMA, RSI above oversold and not overbought, low vol, vol confirm, in uptrend (fast > slow)
+longCondition = ta.crossover(close, fastEma) and rsi > rsiOversold and rsi < rsiOverbought and volFilter and volConfirm and fastEma > slowEma
+// Short: Price crosses below fast EMA, RSI below overbought and not oversold, low vol, vol confirm, in downtrend (fast < slow)
+shortCondition = ta.crossunder(close, fastEma) and rsi < rsiOverbought and rsi > rsiOversold and volFilter and volConfirm and fastEma < slowEma
+
+// EMA Crossover Signals
+emaCrossUp = ta.crossover(fastEma, slowEma)
+emaCrossDown = ta.crossunder(fastEma, slowEma)
+
+// Plots: EMAs for trend visualization
+plot(fastEma, "Fast EMA", color=color.blue, linewidth=2)
+plot(slowEma, "Slow EMA", color=color.orange, linewidth=2)
+
+// EMA Cross Shapes (circles for distinction)
+plotshape(showEmaCross and emaCrossUp, "EMA Bull Cross", style=shape.circle, location=location.belowbar, color=color.lime, size=size.small)
+plotshape(showEmaCross and emaCrossDown, "EMA Bear Cross", style=shape.circle, location=location.abovebar, color=color.maroon, size=size.small)
+
+// Signal Shapes (entry triangles)
+plotshape(showSignals and longCondition, "Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(showSignals and shortCondition, "Short Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// Alerts
+if showAlerts
+    if longCondition
+        alert("AMBI Long Entry Signal", alert.freq_once_per_bar_close)
+    if shortCondition
+        alert("AMBI Short Entry Signal", alert.freq_once_per_bar_close)
