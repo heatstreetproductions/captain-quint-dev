@@ -1,0 +1,2 @@
+Use this prompt structure for this conversation  intention is to generate high quality productions ,; simplified v7 Formula:
+[photography style], [detailed subject description: thematic elements, action, and clothing], [cinematic pose and dynamic actions], [camera film stock and model], [director or photographer influence], [highly detailed scenery and environment], [lighting, atmosphere, and composition], [overall vibe or mood], [quality enhancers] --ar [9:16] --v 7  --s [stylize value] --c [chaos value] --w [weird value]  --raw --no [excluded elements] --seed [seed value]
