@@ -1,0 +1,74 @@
+//@version=5
+indicator(title="Momo [marketrecon]", shorttitle="SQZMOM_Recon", overlay=false)
+
+// Inputs with timeframe-specific defaults
+bbLength = input.int(20, "BB Length", group="Bollinger Bands")
+bbMult = input.float(2.0, "BB MultFactor", group="Bollinger Bands")
+kcLength = input.int(20, "KC Length", group="Keltner Channels")
+kcMult = input.float(1.5, "KC MultFactor", group="Keltner Channels")
+useTrueRange = input.bool(true, "Use True Range for KC", group="Keltner Channels")
+momentumSmooth = input.int(5, "Momentum Smoothing (EMA)", minval=1, group="Momentum")
+useEMA = input.bool(false, "Use EMA for Basis (More Responsive)", group="Advanced")
+showAlerts = input.bool(false, "Enable Alerts", group="Alerts")
+
+// Auto-adjust lengths based on timeframe (for short TFs: shorter lengths to reduce lag; for longer: standard)
+tfMultiplier = switch timeframe.period
+    "1"  => 0.5  // 1min: Halve lengths for responsiveness
+    "3"  => 0.75 // 3min: Slightly shorter
+    "240"=> 1.5  // 4H: Increase for less noise
+    => 1.0       // Default for others
+
+adjBbLength = math.round(bbLength * tfMultiplier)
+adjKcLength = math.round(kcLength * tfMultiplier)
+
+// Source
+src = close
+
+// Basis: SMA or EMA for more responsiveness in short TFs
+basisFunc(len) => useEMA ? ta.ema(src, len) : ta.sma(src, len)
+
+// Bollinger Bands
+basisBb = basisFunc(adjBbLength)
+dev = bbMult * ta.stdev(src, adjBbLength)
+upperBb = basisBb + dev
+lowerBb = basisBb - dev
+
+// Keltner Channels
+basisKc = basisFunc(adjKcLength)
+rangeVal = useTrueRange ? ta.tr(true) : high - low
+rangeMa = ta.sma(rangeVal, adjKcLength)
+upperKc = basisKc + rangeMa * kcMult
+lowerKc = basisKc - rangeMa * kcMult
+
+// Squeeze Logic
+sqzOn  = lowerBb > lowerKc and upperBb < upperKc
+sqzOff = lowerBb < lowerKc and upperBb > upperKc
+noSqz  = not sqzOn and not sqzOff
+
+// Improved Momentum: Linreg with optional EMA smoothing for noise reduction in short TFs
+avgHl = ta.sma((ta.highest(high, adjKcLength) + ta.lowest(low, adjKcLength)) / 2, adjKcLength)
+avgClose = ta.sma(close, adjKcLength)
+normalized = src - (avgHl + avgClose) / 2  // Better normalization for momentum
+rawVal = ta.linreg(normalized, adjKcLength, 0)
+val = ta.ema(rawVal, momentumSmooth)  // Smooth with EMA
+
+// Colors for Histogram
+bColor = val > 0 ? (val > val[1] ? color.lime : color.green) : (val < val[1] ? color.red : color.maroon)
+
+// Colors for Squeeze Line (using visible colors for dark themes)
+sColor = noSqz ? color.blue : sqzOn ? color.orange : color.gray  // Changed black to orange for visibility
+
+// Plots
+plot(val, "Momentum", color=bColor, style=plot.style_columns, linewidth=4)
+plot(0, "Zero Line", color=sColor, style=plot.style_circles, linewidth=2)
+
+// Alerts (for squeeze on/off and momentum crosses)
+if showAlerts
+    if ta.crossover(val, 0) and sqzOff
+        alert("Bullish Momentum Breakout after Squeeze Off", alert.freq_once_per_bar_close)
+    if ta.crossunder(val, 0) and sqzOff
+        alert("Bearish Momentum Breakout after Squeeze Off", alert.freq_once_per_bar_close)
+    if sqzOn and not sqzOn[1]
+        alert("Squeeze On Detected", alert.freq_once_per_bar_close)
+    if sqzOff and not sqzOff[1]
+        alert("Squeeze Off Detected", alert.freq_once_per_bar_close)
