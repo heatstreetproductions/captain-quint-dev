@@ -1,0 +1,645 @@
+//@version=6
+indicator("🦈 Quint Info Dashboard - Adaptive Scoring", overlay=true)
+
+// ==================== INPUTS ====================
+// Core Settings
+string coreGroup = "⚙️ Core Settings"
+multitimeframe = input.bool(true, "Multi-Timeframe Analysis", group=coreGroup)
+htf1 = input.timeframe("15", "HTF 1", group=coreGroup)
+htf2 = input.timeframe("60", "HTF 2", group=coreGroup)
+
+// Adaptive Settings
+string adaptiveGroup = "🔄 Adaptive Settings"
+adaptiveMode = input.bool(true, "Enable Adaptive Scoring", group=adaptiveGroup, tooltip="Automatically adjusts thresholds based on chart volatility")
+volatilityPeriod = input.int(50, "Volatility Lookback", minval=20, maxval=200, group=adaptiveGroup)
+trendStrengthPeriod = input.int(20, "Trend Strength Period", minval=10, maxval=100, group=adaptiveGroup)
+calibrationBars = input.int(100, "Calibration Bars", minval=50, maxval=500, group=adaptiveGroup, tooltip="Bars used to establish baseline")
+
+// Sensitivity Settings
+string sensitivityGroup = "🎚️ Sensitivity Settings"
+scoringMode = input.string("High", "Sensitivity Mode", options=["Low", "Medium", "High", "Ultra"], group=sensitivityGroup)
+priceActionWeight = input.float(1.5, "Price Action Weight", minval=0.5, maxval=3.0, step=0.1, group=sensitivityGroup)
+momentumWeight = input.float(1.2, "Momentum Weight", minval=0.5, maxval=3.0, step=0.1, group=sensitivityGroup)
+volumeWeight = input.float(1.3, "Volume Weight", minval=0.5, maxval=3.0, step=0.1, group=sensitivityGroup)
+
+// Indicator Settings
+string indicatorGroup = "📊 Indicator Settings"
+rsiLength = input.int(14, "RSI Length", minval=5, maxval=50, group=indicatorGroup)
+macdFast = input.int(12, "MACD Fast", minval=5, maxval=50, group=indicatorGroup)
+macdSlow = input.int(26, "MACD Slow", minval=10, maxval=100, group=indicatorGroup)
+macdSignal = input.int(9, "MACD Signal", minval=3, maxval=30, group=indicatorGroup)
+smaShort = input.int(20, "SMA Short", minval=5, maxval=200, group=indicatorGroup)
+smaMedium = input.int(50, "SMA Medium", minval=10, maxval=200, group=indicatorGroup)
+smaLong = input.int(200, "SMA Long", minval=50, maxval=500, group=indicatorGroup)
+
+// Volume Settings
+string volumeGroup = "📈 Volume Settings"
+volumeThreshold = input.float(1.5, "Volume Spike Threshold", minval=1.0, maxval=5.0, step=0.1, group=volumeGroup)
+showGreeks = input.bool(true, "Show Greeks (Delta/Gamma)", group=volumeGroup)
+
+// Signal Settings
+string signalGroup = "🎯 Signal Settings"
+swingLength = input.int(10, "Swing Detection Length", minval=5, maxval=50, group=signalGroup)
+obPeriod = input.int(20, "Order Block Lookback", minval=5, maxval=100, group=signalGroup)
+
+// Display Settings
+string displayGroup = "🎨 Display Settings"
+tablePosition = input.string("Top Right", "Table Position", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group=displayGroup)
+tableSize = input.string("Normal", "Table Size", options=["Small", "Normal", "Large"], group=displayGroup)
+showCalibration = input.bool(true, "Show Calibration Info", group=displayGroup)
+
+// ==================== ADAPTIVE CALIBRATION ====================
+
+// Calculate volatility (ATR-based)
+atr = ta.atr(14)
+atrSMA = ta.sma(atr, volatilityPeriod)
+volatilityRatio = atr / atrSMA
+
+// Normalized volatility (0-2 scale)
+var float minVolRatio = 0.5
+var float maxVolRatio = 2.0
+
+if bar_index >= calibrationBars
+    minVolRatio := math.min(minVolRatio, volatilityRatio)
+    maxVolRatio := math.max(maxVolRatio, volatilityRatio)
+
+normalizedVol = (volatilityRatio - minVolRatio) / (maxVolRatio - minVolRatio)
+normalizedVol := math.max(0, math.min(1, normalizedVol))
+
+// Volatility classification
+volatilityLevel = normalizedVol > 0.7 ? "HIGH" : normalizedVol > 0.4 ? "MEDIUM" : "LOW"
+volatilityColor = normalizedVol > 0.7 ? color.red : normalizedVol > 0.4 ? color.yellow : color.green
+
+// Calculate trend strength (directional movement)
+priceChange = ta.change(close, trendStrengthPeriod)
+absChange = math.abs(priceChange)
+atrChange = atr * trendStrengthPeriod
+trendStrengthRatio = absChange / atrChange
+
+// Normalize trend strength
+var float minTrendStrength = 0.0
+var float maxTrendStrength = 3.0
+
+if bar_index >= calibrationBars
+    minTrendStrength := math.min(minTrendStrength, trendStrengthRatio)
+    maxTrendStrength := math.max(maxTrendStrength, trendStrengthRatio)
+
+normalizedTrend = (trendStrengthRatio - minTrendStrength) / (maxTrendStrength - minTrendStrength)
+normalizedTrend := math.max(0, math.min(1, normalizedTrend))
+
+// Market regime detection
+marketRegime = normalizedTrend > 0.6 ? "TRENDING" : normalizedTrend > 0.3 ? "MIXED" : "RANGING"
+regimeColor = normalizedTrend > 0.6 ? color.blue : normalizedTrend > 0.3 ? color.purple : color.orange
+
+// Calculate adaptive threshold multipliers
+// High volatility = lower thresholds (easier to trigger)
+// Low volatility = higher thresholds (harder to trigger)
+volatilityAdjustment = adaptiveMode ? (1.0 - (normalizedVol * 0.4)) : 1.0
+
+// Trending markets = lower thresholds (clearer signals)
+// Ranging markets = higher thresholds (avoid whipsaws)
+trendAdjustment = adaptiveMode ? (1.0 - (normalizedTrend * 0.3)) : 1.0
+
+// Combined adaptive multiplier
+adaptiveMultiplier = volatilityAdjustment * trendAdjustment
+
+// ==================== POSITION MAPPING ====================
+getTablePosition() =>
+    switch tablePosition
+        "Top Left" => position.top_left
+        "Top Center" => position.top_center
+        "Top Right" => position.top_right
+        "Middle Left" => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right" => position.middle_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+
+getTextSize() =>
+    switch tableSize
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.normal
+
+getSensitivityMultiplier() =>
+    switch scoringMode
+        "Low" => 0.7
+        "Medium" => 1.0
+        "High" => 1.5
+        "Ultra" => 2.0
+        => 1.0
+
+// ==================== MARKET STRUCTURE ====================
+
+isSwingHigh(len) =>
+    if bar_index < len
+        false
+    else
+        highestInRange = true
+        for i = 1 to len
+            if high[i] > high or (bar_index >= i and high[i] >= high)
+                highestInRange := false
+                break
+        highestInRange
+
+isSwingLow(len) =>
+    if bar_index < len
+        false
+    else
+        lowestInRange = true
+        for i = 1 to len
+            if low[i] < low or (bar_index >= i and low[i] <= low)
+                lowestInRange := false
+                break
+        lowestInRange
+
+swingHigh = isSwingHigh(swingLength)
+swingLow = isSwingLow(swingLength)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+if swingHigh
+    lastSwingHigh := high
+
+if swingLow
+    lastSwingLow := low
+
+bullishBOS = not na(lastSwingHigh) and close > lastSwingHigh
+bearishBOS = not na(lastSwingLow) and close < lastSwingLow
+
+bullishCHoCH = not na(lastSwingLow) and close > lastSwingLow and close[1] <= lastSwingLow
+bearishCHoCH = not na(lastSwingHigh) and close < lastSwingHigh and close[1] >= lastSwingHigh
+
+// ==================== ORDER BLOCKS ====================
+
+detectBullishOB() =>
+    isValid = false
+    strongBullish = close > open and (close - open) > (high - low) * 0.6
+    
+    if strongBullish
+        for i = 1 to obPeriod
+            if bar_index >= i and close[i] < open[i]
+                isValid := true
+                break
+    isValid
+
+detectBearishOB() =>
+    isValid = false
+    strongBearish = close < open and (open - close) > (high - low) * 0.6
+    
+    if strongBearish
+        for i = 1 to obPeriod
+            if bar_index >= i and close[i] > open[i]
+                isValid := true
+                break
+    isValid
+
+bullOBActive = detectBullishOB()
+bearOBActive = detectBearishOB()
+
+// ==================== FAIR VALUE GAPS ====================
+
+bullishFVG = bar_index >= 2 and low > high[2] and close[1] > open[1]
+bearishFVG = bar_index >= 2 and high < low[2] and close[1] < open[1]
+
+// ==================== VOLUME ANALYSIS ====================
+
+avgVolume = ta.sma(volume, 20)
+volumeSpike = volume > avgVolume * volumeThreshold
+
+buyVolume = close > open ? volume : 0.0
+sellVolume = close < open ? volume : 0.0
+volumeDelta = ta.sma(buyVolume - sellVolume, 10)
+
+deltaPercent = (volumeDelta / avgVolume) * 100
+
+gamma = ta.change(volumeDelta, 1)
+gammaPercent = (gamma / avgVolume) * 100
+
+vwapValue = ta.vwap(close)
+priceVsVWAP = ((close - vwapValue) / vwapValue) * 100
+
+volumeMomentum = ta.roc(volume, 5)
+
+// ==================== MOMENTUM INDICATORS ====================
+
+rsi = ta.rsi(close, rsiLength)
+rsiOverbought = rsi > 70
+rsiOversold = rsi < 30
+rsiDivergenceBull = rsi > rsi[1] and low < low[1]
+rsiDivergenceBear = rsi < rsi[1] and high > high[1]
+
+rsiMomentum = ta.change(rsi, 1)
+
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdCrossUp = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+macdBullish = macdLine > signalLine and histLine > histLine[1]
+macdBearish = macdLine < signalLine and histLine < histLine[1]
+
+macdHistMomentum = ta.change(histLine, 1)
+
+stochK = ta.stoch(close, high, low, 14)
+stochD = ta.sma(stochK, 3)
+stochCrossUp = ta.crossover(stochK, stochD)
+stochCrossDown = ta.crossunder(stochK, stochD)
+
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+strongTrend = adx > 25
+trendUp = diPlus > diMinus
+trendDown = diMinus > diPlus
+
+sma20 = ta.sma(close, smaShort)
+sma50 = ta.sma(close, smaMedium)
+sma200 = ta.sma(close, smaLong)
+
+smaAlignmentBull = sma20 > sma50 and sma50 > sma200
+smaAlignmentBear = sma20 < sma50 and sma50 < sma200
+smaAlignmentMixed = not smaAlignmentBull and not smaAlignmentBear
+
+priceVsSMA20 = ((close - sma20) / sma20) * 100
+priceVsSMA50 = ((close - sma50) / sma50) * 100
+priceVsSMA200 = ((close - sma200) / sma200) * 100
+
+sma20Slope = ta.change(sma20, 5)
+sma50Slope = ta.change(sma50, 5)
+
+// ==================== PRICE ACTION ====================
+
+candleBody = math.abs(close - open)
+candleRange = high - low
+bodyRatio = candleBody / candleRange
+
+strongBullCandle = close > open and bodyRatio > 0.7
+strongBearCandle = close < open and bodyRatio > 0.7
+
+bullishStreak = close > open and close[1] > open[1]
+bearishStreak = close < open and close[1] < open[1]
+
+higherHigh = high > high[1] and low > low[1]
+lowerLow = high < high[1] and low < low[1]
+
+// ==================== CANDLESTICK PATTERNS ====================
+
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+isHammer = lowerWick > bodySize * 2 and upperWick < bodySize * 0.5 and close > open
+isShootingStar = upperWick > bodySize * 2 and lowerWick < bodySize * 0.5 and close < open
+
+morningStar = bar_index >= 2 and close[2] < open[2] and math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and close > open and close > (high[2] + low[2]) / 2
+eveningStar = bar_index >= 2 and close[2] > open[2] and math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and close < open and close < (high[2] + low[2]) / 2
+
+isDoji = bodySize < (high - low) * 0.1
+
+bullishPinBar = lowerWick > bodySize * 1.5 and upperWick < bodySize * 0.5
+bearishPinBar = upperWick > bodySize * 1.5 and lowerWick < bodySize * 0.5
+
+// ==================== MULTI-TIMEFRAME ANALYSIS ====================
+
+htf1Close = request.security(syminfo.tickerid, htf1, close)
+htf1Trend = htf1Close > ta.sma(htf1Close, 20)
+
+htf2Close = request.security(syminfo.tickerid, htf2, close)
+htf2Trend = htf2Close > ta.sma(htf2Close, 50)
+
+htfBullish = htf1Trend and htf2Trend
+htfBearish = not htf1Trend and not htf2Trend
+htfMixed = not htfBullish and not htfBearish
+
+// ==================== ENHANCED SIGNAL SCORING SYSTEM ====================
+
+var float bullScore = 0.0
+var float bearScore = 0.0
+
+bullScore := 0.0
+bearScore := 0.0
+
+sensitivityMult = getSensitivityMultiplier()
+
+// PRICE ACTION SECTION
+var float priceActionBull = 0.0
+var float priceActionBear = 0.0
+priceActionBull := 0.0
+priceActionBear := 0.0
+
+if bullishBOS
+    priceActionBull += 10
+if bearishBOS
+    priceActionBear += 10
+
+if bullishCHoCH
+    priceActionBull += 8
+if bearishCHoCH
+    priceActionBear += 8
+
+if bullOBActive
+    priceActionBull += 8
+if bearOBActive
+    priceActionBear += 8
+
+if strongBullCandle
+    priceActionBull += 5
+if strongBearCandle
+    priceActionBear += 5
+
+if bullishStreak
+    priceActionBull += 4
+if bearishStreak
+    priceActionBear += 4
+
+if higherHigh
+    priceActionBull += 5
+if lowerLow
+    priceActionBear += 5
+
+if bullishEngulfing or isHammer or morningStar or bullishPinBar
+    priceActionBull += 5
+if bearishEngulfing or isShootingStar or eveningStar or bearishPinBar
+    priceActionBear += 5
+
+if bullishFVG
+    priceActionBull += 5
+if bearishFVG
+    priceActionBear += 5
+
+bullScore += priceActionBull * priceActionWeight
+bearScore += priceActionBear * priceActionWeight
+
+// MOMENTUM SECTION
+var float momentumBull = 0.0
+var float momentumBear = 0.0
+momentumBull := 0.0
+momentumBear := 0.0
+
+if macdBullish
+    momentumBull += 8
+if macdBearish
+    momentumBear += 8
+
+if macdCrossUp
+    momentumBull += 5
+if macdCrossDown
+    momentumBear += 5
+
+if macdHistMomentum > 0
+    momentumBull += 4
+if macdHistMomentum < 0
+    momentumBear += 4
+
+if rsi > 50
+    momentumBull += 6
+if rsi < 50
+    momentumBear += 6
+
+if rsiMomentum > 0
+    momentumBull += 4
+if rsiMomentum < 0
+    momentumBear += 4
+
+if rsiDivergenceBull
+    momentumBull += 6
+if rsiDivergenceBear
+    momentumBear += 6
+
+if stochCrossUp and stochK < 50
+    momentumBull += 4
+if stochCrossDown and stochK > 50
+    momentumBear += 4
+
+if strongTrend and trendUp
+    momentumBull += 5
+if strongTrend and trendDown
+    momentumBear += 5
+
+if smaAlignmentBull
+    momentumBull += 8
+if smaAlignmentBear
+    momentumBear += 8
+
+if sma20Slope > 0 and sma50Slope > 0
+    momentumBull += 4
+if sma20Slope < 0 and sma50Slope < 0
+    momentumBear += 4
+
+bullScore += momentumBull * momentumWeight
+bearScore += momentumBear * momentumWeight
+
+// VOLUME SECTION
+var float volumeBull = 0.0
+var float volumeBear = 0.0
+volumeBull := 0.0
+volumeBear := 0.0
+
+if volumeDelta > 0
+    volumeBull += 10
+if volumeDelta < 0
+    volumeBear += 10
+
+if volumeSpike and close > open
+    volumeBull += 8
+if volumeSpike and close < open
+    volumeBear += 8
+
+if volumeMomentum > 0
+    volumeBull += 5
+if volumeMomentum < 0
+    volumeBear += 5
+
+if gamma > 0
+    volumeBull += 5
+if gamma < 0
+    volumeBear += 5
+
+if close > vwapValue
+    volumeBull += 7
+if close < vwapValue
+    volumeBear += 7
+
+bullScore += volumeBull * volumeWeight
+bearScore += volumeBear * volumeWeight
+
+// MULTI-TIMEFRAME
+if multitimeframe and htfBullish
+    bullScore += 10
+if multitimeframe and htfBearish
+    bearScore += 10
+
+// Apply sensitivity multiplier
+bullScore := bullScore * sensitivityMult
+bearScore := bearScore * sensitivityMult
+
+// Normalize to 0-100 scale
+maxPossibleScore = (50 * priceActionWeight + 54 * momentumWeight + 35 * volumeWeight + 10) * sensitivityMult
+bullScore := (bullScore / maxPossibleScore) * 100
+bearScore := (bearScore / maxPossibleScore) * 100
+
+// ==================== ADAPTIVE THRESHOLDS ====================
+
+// Base thresholds
+baseStrongThreshold = 70.0
+baseMediumThreshold = 55.0
+baseWeakThreshold = 35.0
+
+// Apply adaptive adjustment
+adaptiveStrongThreshold = baseStrongThreshold * adaptiveMultiplier
+adaptiveMediumThreshold = baseMediumThreshold * adaptiveMultiplier
+adaptiveWeakThreshold = baseWeakThreshold * adaptiveMultiplier
+
+// Ensure thresholds stay within reasonable bounds
+adaptiveStrongThreshold := math.max(50, math.min(85, adaptiveStrongThreshold))
+adaptiveMediumThreshold := math.max(35, math.min(70, adaptiveMediumThreshold))
+adaptiveWeakThreshold := math.max(20, math.min(50, adaptiveWeakThreshold))
+
+// ==================== INFO TABLE ====================
+
+var table infoTable = table.new(getTablePosition(), 3, showGreeks ? (showCalibration ? 19 : 17) : (showCalibration ? 17 : 15), bgcolor=color.new(color.black, 85), border_width=2, border_color=color.new(color.blue, 50))
+
+if barstate.islast
+    txtSize = getTextSize()
+    headerSize = tableSize == "Large" ? size.large : tableSize == "Small" ? size.small : size.normal
+    
+    // Header
+    table.cell(infoTable, 0, 0, "🦈 QUINT SYSTEM", text_color=color.white, text_size=headerSize, bgcolor=color.new(color.blue, 60))
+    table.merge_cells(infoTable, 0, 0, 2, 0)
+    
+    currentRow = 1
+    
+    // Calibration Info
+    if showCalibration
+        table.cell(infoTable, 0, currentRow, "Market Regime", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.black, 70))
+        table.cell(infoTable, 1, currentRow, marketRegime, text_color=regimeColor, text_size=size.tiny)
+        table.cell(infoTable, 2, currentRow, volatilityLevel, text_color=volatilityColor, text_size=size.tiny)
+        currentRow := currentRow + 1
+        
+        table.cell(infoTable, 0, currentRow, "Thresholds", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.black, 70))
+        thresholdText = str.tostring(math.round(adaptiveWeakThreshold)) + "/" + str.tostring(math.round(adaptiveMediumThreshold)) + "/" + str.tostring(math.round(adaptiveStrongThreshold))
+        table.cell(infoTable, 1, currentRow, thresholdText, text_color=color.yellow, text_size=size.tiny)
+        table.cell(infoTable, 2, currentRow, adaptiveMode ? "ADAPTIVE" : "FIXED", text_size=size.tiny)
+        currentRow := currentRow + 1
+    
+    // Bull Score
+    table.cell(infoTable, 0, currentRow, "Bull Score", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    bullScoreColor = bullScore >= adaptiveStrongThreshold ? color.lime : bullScore >= adaptiveMediumThreshold ? color.green : bullScore >= adaptiveWeakThreshold ? color.yellow : color.gray
+    table.cell(infoTable, 1, currentRow, str.tostring(math.round(bullScore, 1)), text_color=bullScoreColor, text_size=headerSize)
+    table.cell(infoTable, 2, currentRow, bullScore >= adaptiveStrongThreshold ? "🔥" : bullScore >= adaptiveMediumThreshold ? "⚡" : bullScore >= adaptiveWeakThreshold ? "💫" : "—", text_size=txtSize)
+    currentRow := currentRow + 1
+    
+    // Bear Score
+    table.cell(infoTable, 0, currentRow, "Bear Score", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    bearScoreColor = bearScore >= adaptiveStrongThreshold ? color.red : bearScore >= adaptiveMediumThreshold ? color.orange : bearScore >= adaptiveWeakThreshold ? color.yellow : color.gray
+    table.cell(infoTable, 1, currentRow, str.tostring(math.round(bearScore, 1)), text_color=bearScoreColor, text_size=headerSize)
+    table.cell(infoTable, 2, currentRow, bearScore >= adaptiveStrongThreshold ? "🔥" : bearScore >= adaptiveMediumThreshold ? "⚡" : bearScore >= adaptiveWeakThreshold ? "💫" : "—", text_size=txtSize)
+    currentRow := currentRow + 1
+    
+    // Divider
+    table.cell(infoTable, 0, currentRow, "━━━━━━━━━━━━━━━", text_color=color.new(color.gray, 30), text_size=size.tiny, bgcolor=color.new(color.black, 90))
+    table.merge_cells(infoTable, 0, currentRow, 2, currentRow)
+    currentRow := currentRow + 1
+    
+    // Trend
+    table.cell(infoTable, 0, currentRow, "Trend", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    trendText = strongTrend and trendUp ? "BULLISH" : strongTrend and trendDown ? "BEARISH" : "NEUTRAL"
+    trendColor = strongTrend and trendUp ? color.green : strongTrend and trendDown ? color.red : color.gray
+    table.cell(infoTable, 1, currentRow, trendText, text_color=trendColor, text_size=txtSize)
+    table.cell(infoTable, 2, currentRow, "ADX: " + str.tostring(math.round(adx)), text_color=color.white, text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // RSI
+    table.cell(infoTable, 0, currentRow, "RSI", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    rsiColor = rsiOverbought ? color.red : rsiOversold ? color.lime : rsi > 50 ? color.green : color.orange
+    table.cell(infoTable, 1, currentRow, str.tostring(math.round(rsi, 1)), text_color=rsiColor, text_size=txtSize)
+    rsiStatus = rsiOverbought ? "⚠️OB" : rsiOversold ? "⚠️OS" : rsiDivergenceBull ? "🔼DIV" : rsiDivergenceBear ? "🔽DIV" : rsiMomentum > 0 ? "⬆️" : "⬇️"
+    table.cell(infoTable, 2, currentRow, rsiStatus, text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // MACD
+    table.cell(infoTable, 0, currentRow, "MACD", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    macdStatus = macdBullish ? "BULL" : macdBearish ? "BEAR" : "NEUTRAL"
+    macdColor = macdBullish ? color.green : macdBearish ? color.red : color.gray
+    table.cell(infoTable, 1, currentRow, macdStatus, text_color=macdColor, text_size=txtSize)
+    macdSignalText = macdCrossUp ? "🔼CROSS" : macdCrossDown ? "🔽CROSS" : str.tostring(math.round(histLine, 2))
+    table.cell(infoTable, 2, currentRow, macdSignalText, text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // SMA
+    table.cell(infoTable, 0, currentRow, "SMA", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    smaStatus = smaAlignmentBull ? "BULL" : smaAlignmentBear ? "BEAR" : "MIXED"
+    smaColor = smaAlignmentBull ? color.green : smaAlignmentBear ? color.red : color.orange
+    table.cell(infoTable, 1, currentRow, smaStatus, text_color=smaColor, text_size=txtSize)
+    smaDetail = close > sma20 ? ">" : "<"
+    smaDetail := smaDetail + str.tostring(smaShort) + " " + (close > sma50 ? ">" : "<") + str.tostring(smaMedium)
+    table.cell(infoTable, 2, currentRow, smaDetail, text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // VWAP
+    table.cell(infoTable, 0, currentRow, "VWAP", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    vwapStatus = close > vwapValue ? "ABOVE" : "BELOW"
+    vwapColor = close > vwapValue ? color.green : color.red
+    table.cell(infoTable, 1, currentRow, vwapStatus, text_color=vwapColor, text_size=txtSize)
+    table.cell(infoTable, 2, currentRow, str.tostring(math.round(priceVsVWAP, 2)) + "%", text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // Divider
+    table.cell(infoTable, 0, currentRow, "━━━━━━━━━━━━━━━", text_color=color.new(color.gray, 30), text_size=size.tiny, bgcolor=color.new(color.black, 90))
+    table.merge_cells(infoTable, 0, currentRow, 2, currentRow)
+    currentRow := currentRow + 1
+    
+    // Volume
+    table.cell(infoTable, 0, currentRow, "Volume", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    volRatio = volume / avgVolume
+    volColor = volRatio > volumeThreshold ? color.yellow : volRatio > 1 ? color.white : color.gray
+    table.cell(infoTable, 1, currentRow, str.tostring(math.round(volRatio, 2)) + "x", text_color=volColor, text_size=txtSize)
+    table.cell(infoTable, 2, currentRow, volumeSpike ? "🔥HIGH" : "—", text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // Greeks Section
+    if showGreeks
+        // Delta
+        table.cell(infoTable, 0, currentRow, "Delta", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+        deltaColor = volumeDelta > 0 ? color.green : volumeDelta < 0 ? color.red : color.gray
+        deltaText = volumeDelta > 0 ? "BUYING" : volumeDelta < 0 ? "SELLING" : "NEUTRAL"
+        table.cell(infoTable, 1, currentRow, deltaText, text_color=deltaColor, text_size=txtSize)
+        table.cell(infoTable, 2, currentRow, str.tostring(math.round(deltaPercent, 1)) + "%", text_size=size.tiny)
+        currentRow := currentRow + 1
+        
+        // Gamma
+        table.cell(infoTable, 0, currentRow, "Gamma", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+        gammaColor = gamma > 0 ? color.green : gamma < 0 ? color.red : color.gray
+        gammaText = gamma > 0 ? "ACCEL" : gamma < 0 ? "DECEL" : "FLAT"
+        table.cell(infoTable, 1, currentRow, gammaText, text_color=gammaColor, text_size=txtSize)
+        table.cell(infoTable, 2, currentRow, str.tostring(math.round(gammaPercent, 1)) + "%", text_size=size.tiny)
+        currentRow := currentRow + 1
+    
+    // HTF Alignment
+    if multitimeframe
+        table.cell(infoTable, 0, currentRow, "HTF Align", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+        htfText = htfBullish ? "BULLISH" : htfBearish ? "BEARISH" : "MIXED"
+        htfColor = htfBullish ? color.green : htfBearish ? color.red : color.orange
+        table.cell(infoTable, 1, currentRow, htfText, text_color=htfColor, text_size=txtSize)
+        table.cell(infoTable, 2, currentRow, htf1 + "/" + htf2, text_size=size.tiny)
+        currentRow := currentRow + 1
+    
+    // Structure
+    table.cell(infoTable, 0, currentRow, "Structure", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    bosText = bullishBOS ? "BULL BOS" : bearishBOS ? "BEAR BOS" : bullishCHoCH ? "BULL CHoCH" : bearishCHoCH ? "BEAR CHoCH" : "RANGE"
+    bosColor = bullishBOS or bullishCHoCH ? color.green : bearishBOS or bearishCHoCH ? color.red : color.gray
+    table.cell(infoTable, 1, currentRow, bosText, text_color=bosColor, text_size=txtSize)
+    table.cell(infoTable, 2, currentRow, bullishBOS or bullishCHoCH ? "⬆️" : bearishBOS or bearishCHoCH ? "⬇️" : "↔️", text_size=size.tiny)
+    currentRow := currentRow + 1
+    
+    // Signal Status
+    table.cell(infoTable, 0, currentRow, "Status", text_color=color.white, text_size=txtSize, bgcolor=color.new(color.black, 70))
+    statusText = bullScore > bearScore and bullScore >= adaptiveWeakThreshold ? "🟢 BUY" : bearScore > bullScore and bearScore >= adaptiveWeakThreshold ? "🔴 SELL" : "⚪ NEUTRAL"
+    statusColor = bullScore > bearScore and bullScore >= adaptiveMediumThreshold ? color.green : bearScore > bullScore and bearScore >= adaptiveMediumThreshold ? color.red : color.gray
+    table.cell(infoTable, 1, currentRow, statusText, text_color=statusColor, text_size=txtSize)
+    strength = math.max(bullScore, bearScore)
+    strengthText = strength >= adaptiveStrongThreshold ? "STRONG" : strength >= adaptiveMediumThreshold ? "MEDIUM" : strength >= adaptiveWeakThreshold ? "WEAK" : "—"
+    table.cell(infoTable, 2, currentRow, strengthText, text_size=size.tiny)
